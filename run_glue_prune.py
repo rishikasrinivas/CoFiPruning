@@ -9,7 +9,8 @@ import datasets
 import numpy as np
 import torch
 import transformers
-from datasets import load_dataset, load_metric, DatasetDict
+import evaluate
+from datasets import load_dataset, DatasetDict
 from transformers import AutoConfig, AutoTokenizer, EvalPrediction, default_data_collator, DataCollatorWithPadding
 from transformers import (HfArgumentParser, TrainingArguments, PretrainedConfig,
                           glue_output_modes, glue_tasks_num_labels, set_seed)
@@ -51,7 +52,7 @@ def main():
             json_file=os.path.abspath(sys.argv[1]))
     else:
         model_args, data_args, training_args, additional_args = parser.parse_args_into_dataclasses()
-    
+    #print("training args ", training_args)
     os.makedirs(training_args.output_dir, exist_ok=True)
 
      # Setup logging
@@ -184,29 +185,31 @@ def main():
     if additional_args.do_distill:
         config.output_attentions = True
         config.output_hidden_states = True
-
+    from safetensors.torch import load_file
     Model = CoFiBertForSequenceClassification if model_args.model_name_or_path.startswith(
         "bert") else CoFiRobertaForSequenceClassification
-
+    print("loading teacher")
     teacher_model = None
     if additional_args.do_distill:
         teacher_model = Model.from_pretrained(
             additional_args.distillation_path,
-            config=deepcopy(config)
+            config=deepcopy(config),
+            teacher=True
         )
         teacher_model.eval() #! inside has a cofibertmodel #! CofiBertForSequenceClassification
 
     config.do_layer_distill = additional_args.do_layer_distill #! True
-
+    print("loading student ",model_args.model_name_or_path )
     model = Model.from_pretrained(
         model_args.model_name_or_path,
         from_tf=bool(".ckpt" in model_args.model_name_or_path),
         config=config,
+        teacher=False,
         cache_dir=model_args.cache_dir,
         revision=model_args.model_revision,
         use_auth_token=True if model_args.use_auth_token else None,
     ) #! inside the function, we get the original struct  #! CofiBertForSequenceClassification
-
+    torch.save(model.state_dict(), "first_loaded_student.pth")
     # initialize the layer transformation matrix to be an identity matrix
     if additional_args.do_layer_distill:
         initialize_layer_transformation(model)
@@ -310,13 +313,17 @@ def main():
         train_dataset = raw_datasets["train"]
         if data_args.max_train_samples is not None:
             train_dataset = train_dataset.select(range(data_args.max_train_samples))
-
+    from torch.utils.data import DataLoader
     if training_args.do_eval:
         if "validation" not in raw_datasets and "validation_matched" not in raw_datasets:
             raise ValueError("--do_eval requires a validation dataset")
         eval_dataset = raw_datasets["validation_matched" if data_args.task_name == "mnli" else "validation"]
         if data_args.max_eval_samples is not None:
             eval_dataset = eval_dataset.select(range(data_args.max_eval_samples))
+        print("Loading sparse weights")
+        weights=load_file("out/MNLI/CoFi/MNLI_sparsity0.95/model.safetensors")
+        model.load_state_dict(weights)
+        
 
     if training_args.do_predict or data_args.task_name is not None or data_args.test_file is not None:
         if "test" not in raw_datasets and "test_matched" not in raw_datasets:
@@ -332,24 +339,32 @@ def main():
 
     # Get the metric function
     if data_args.task_name is not None:
-        metric = load_metric("glue", data_args.task_name)
+        metric = evaluate.load("glue", data_args.task_name)
     else:
-        metric = load_metric("accuracy")
-
+        metric = evaluate.load("accuracy")
+    import gc
     # You can define your custom compute_metrics function. It takes an `EvalPrediction` object (a namedtuple with a
     # predictions and label_ids field) and has to return a dictionary string to float.
     def compute_metrics(p: EvalPrediction):
+     
         preds = p.predictions[0] if isinstance(p.predictions, tuple) else p.predictions
         preds = np.squeeze(preds) if is_regression else np.argmax(preds, axis=1)
+        labels = p.label_ids
+        if hasattr(preds, 'device'):  # If it's a torch tensor
+            preds = preds.detach().cpu().numpy()
+            labels = labels.detach().cpu().numpy()
+
+        gc.collect()
+        torch.cuda.empty_cache()
         if data_args.task_name is not None:
-            result = metric.compute(predictions=preds, references=p.label_ids)
+            result = metric.compute(predictions=preds, references=labels)
             if len(result) > 1:
                 result["combined_score"] = np.mean(list(result.values())).item()
             return result
         elif is_regression:
-            return {"mse": ((preds - p.label_ids) ** 2).mean().item()}
+            return {"mse": ((preds - labels) ** 2).mean().item()}
         else:
-            return {"accuracy": (preds == p.label_ids).astype(np.float32).mean().item()}
+            return {"accuracy": (preds == labels).astype(np.float32).mean().item()}
 
     # Data collator will default to DataCollatorWithPadding when the tokenizer is passed to Trainer, so we change it if
     # we already did the padding.
@@ -376,13 +391,18 @@ def main():
         tokenizer=tokenizer,
         data_collator=data_collator,
         l0_module=l0_module,
-        teacher_model=teacher_model
+        teacher_model=teacher_model,
+  
     )
 
     if training_args.do_train:
         trainer.train()
+        
         trainer.save_model()
         tokenizer.save_pretrained(training_args.output_dir)
+        print(trainer.evaluate())
+    
+    
 
 
 if __name__ == "__main__":

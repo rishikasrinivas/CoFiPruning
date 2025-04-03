@@ -91,17 +91,17 @@ class CoFiTrainer(Trainer):
     ):
 
         Trainer.__init__(self, model, args, data_collator, train_dataset,
-                         eval_dataset, tokenizer, model_init, compute_metrics, **kwargs)
+                         eval_dataset, tokenizer, model_init, compute_metrics=compute_metrics, **kwargs)
 
         self.additional_args = additional_args
-
+        self.finetuned_teacher = False
         self.l0_module = l0_module
         self.prepruning_finetune_steps = 100
         self.start_prune = False
-
+        self.train_data=train_dataset
+        self.val_data=eval_dataset
         self.l0_optimizer = None
         self.lagrangian_optimizer = None
-
         self.eval_counter = Eval_Counter()
         self.start_saving_best = True if self.additional_args.pruning_type is None else False
 
@@ -172,8 +172,9 @@ class CoFiTrainer(Trainer):
                 )
             else:
                 self.lr_scheduler = None
-
+    
     def train(self):
+        
         train_dataloader = self.get_train_dataloader()
         num_update_steps_per_epoch = len(
             train_dataloader) // self.args.gradient_accumulation_steps
@@ -200,12 +201,10 @@ class CoFiTrainer(Trainer):
         self.create_optimizer_and_scheduler(num_training_steps=self.t_total, build_l0_optimizer = self.start_prune)
 
         model = self.model
-
-        total_train_batch_size = (
-            self.args.train_batch_size
-            * self.args.gradient_accumulation_steps
-            * (torch.distributed.get_world_size() if self.args.local_rank != -1 else 1)
-        )
+        torch.save(model.state_dict(), "weights_as_soon_as_enter_trainer.pth")
+        
+                                
+        total_train_batch_size = 1
 
         logger.info("***** Running training *****")
 
@@ -250,7 +249,8 @@ class CoFiTrainer(Trainer):
         self.evaluate()
 
         # training
-        for epoch in range(epochs_trained, int(np.ceil(num_train_epochs))): #! 20 epoch
+        for epoch in range(1): #! 20 epoch
+            print(f"Starting epoch {epoch}")
             epoch_start = time.time()
 
             if isinstance(train_dataloader, DataLoader) and isinstance(train_dataloader.sampler, DistributedSampler):
@@ -285,6 +285,7 @@ class CoFiTrainer(Trainer):
                 loss_terms = self.training_step(model, inputs)
                 tr_loss_step = loss_terms["loss"]
                 lag_loss_step = loss_terms["lagrangian_loss"]
+          
 
                 tr_loss += tr_loss_step
                 lag_loss += lag_loss_step if lag_loss_step is not None else 0.0
@@ -383,6 +384,8 @@ class CoFiTrainer(Trainer):
         prediction_loss_only = (
             prediction_loss_only if prediction_loss_only is not None else self.args.prediction_loss_only
         )
+        
+        
 
         # disable output hidden states and attention during evaluation
         self.model.config.output_hidden_states = False
@@ -392,6 +395,7 @@ class CoFiTrainer(Trainer):
 
         # multi-gpu eval
         model = self.model
+        torch.save(model.state_dict(), "weights_as_soon_as_enter_eval.pth")
 
         batch_size = dataloader.batch_size
         logger.info("***** Running %s *****", description)
@@ -408,6 +412,7 @@ class CoFiTrainer(Trainer):
         all_preds = None
         all_labels = None
         model.eval()
+        torch.save(model.state_dict(), "weights_aftermodelevalsetting.pth")
 
         if self.args.past_index >= 0:
             self._past = None
@@ -468,10 +473,13 @@ class CoFiTrainer(Trainer):
             labels = nested_numpify(labels_host)
             all_labels = labels if all_labels is None else nested_concat(
                 all_labels, labels, padding_index=-100)
-
+            
+        print("Predictions: ", all_preds.shape)
+        print("Labels: ", all_labels)
         if self.compute_metrics is not None and all_preds is not None and all_labels is not None:
             metrics = self.compute_metrics(EvalPrediction(
                 predictions=all_preds, label_ids=all_labels))
+            print(metrics)
         else:
             metrics = {}
 
@@ -510,6 +518,7 @@ class CoFiTrainer(Trainer):
         eval_score = 0
 
         name = glue_tasks[self.model.config.finetuning_task]
+        print("Name is ", name)
         if isinstance(name, str):
             if name in output.metrics:
                 eval_score = output.metrics[name]
@@ -518,12 +527,15 @@ class CoFiTrainer(Trainer):
                 if na in output.metrics:
                     eval_score = output.metrics[na]
                     break
+        print("Eval score is ", eval_score)
 
         # logger.info(f"starting saving best: {self.global_step} {self.start_saving_best}")
-
-        if self.start_saving_best:
+    
+        if True:#self.start_saving_best:
+            
             best_so_far = self.eval_counter.update(
                 self.epoch, self.global_step, eval_score)
+            print(f"======Saving best: {best_so_far}========")
             if best_so_far:
                 best_dir = os.path.join(self.args.output_dir, "best")
                 if not os.path.exists(best_dir):
@@ -663,17 +675,47 @@ class CoFiTrainer(Trainer):
         inputs["attention_mask"] = inputs["attention_mask"][:, :max_length]
         if "token_type_ids" in inputs:
             inputs["token_type_ids"] = inputs["token_type_ids"][:, :max_length]
+            
+    def finetune_teacher(self,teacher):
+        #weights = torch.load("model_best.pth", map_location=torch.device("cpu"))['state_dict']
+        print(f"Finetuning MNLI teacher model ")
+        
+        training_args = TrainingArguments(
+            output_dir="mnli_teacher",
+            per_device_train_batch_size=16,
+            num_train_epochs=3,
+            evaluation_strategy="steps",
+            
+            save_strategy="steps",
+            save_steps=500,
+            learning_rate=2e-5,
+        )
 
+        trainer = Trainer(
+            model=teacher,
+            args=training_args,
+            train_dataset=self.train_data,
+            eval_dataset=self.val_data
+        )
+        trainer.train()
+        weights = teacher.state_dict()
+        teacher.save_pretrained("fine_tuned_teacher_mnli")
+        return teacher
+    
+   
 
     def training_step(self, model: torch.nn.Module, inputs: Dict[str, Union[torch.Tensor, Any]]) -> List[torch.Tensor]:
         model.train()
         if self.l0_module is not None:
             self.l0_module.train()
         inputs = self._prepare_inputs(inputs)
-
         distill_loss = None
         distill_ce_loss = None
+        
         if self.teacher_model is not None:
+            #if not self.finetuned_teacher:
+                #self.teacher_model = self.finetune_teacher(self.teacher_model)
+                #self.finetuned_teacher = True
             with torch.no_grad():
                 # only retain inputs of certain keys
                 teacher_inputs_keys = ["input_ids", "attention_mask", "token_type_ids", "position_ids", "labels",
@@ -682,7 +724,9 @@ class CoFiTrainer(Trainer):
                                   for key in teacher_inputs_keys if key in inputs}
                 self.shortens_inputs(teacher_inputs)
                 teacher_outputs = self.teacher_model(**teacher_inputs)
+            
             self.shortens_inputs(inputs)
+            
             student_outputs = model(**inputs) #! get the two outputs
 
             zs = {key: inputs[key] for key in inputs if "_z" in key} #! extract the zs

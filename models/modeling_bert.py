@@ -16,7 +16,11 @@ from transformers.models.bert.modeling_bert import (
     BertAttention, BertEmbeddings, BertEncoder, BertForQuestionAnswering,
     BertForSequenceClassification, BertLayer, BertModel, BertOutput,
     BertSelfAttention, BertSelfOutput, QuestionAnsweringModelOutput)
-from transformers.file_utils import hf_bucket_url, cached_path
+from transformers.trainer import Trainer
+from transformers.training_args import TrainingArguments
+from safetensors.torch import load_file
+from huggingface_hub import hf_hub_download
+
 from utils.cofi_utils import *
 logger = logging.getLogger(__name__)
 
@@ -55,14 +59,20 @@ class CoFiBertForSequenceClassification(BertForSequenceClassification):
             self.layer_transformation = None
 
     @classmethod
-    def from_pretrained(cls, pretrained_model_name_or_path: Optional[Union[str, os.PathLike]], *model_args, **kwargs):
-        if os.path.exists(pretrained_model_name_or_path):
-            weights = torch.load(os.path.join(pretrained_model_name_or_path, "pytorch_model.bin"), map_location=torch.device("cpu"))
-        else:
-            archive_file = hf_bucket_url(pretrained_model_name_or_path, filename="pytorch_model.bin") 
-            resolved_archive_file = cached_path(archive_file)
-            weights = torch.load(resolved_archive_file, map_location="cpu")
+    def from_pretrained(cls, pretrained_model_name_or_path: Optional[Union[str, os.PathLike]], teacher, *model_args, **kwargs):
 
+        if teacher:
+            print("Loading weights from fine_tuned_teacher_mnli/model.safetensors")
+            weights = load_file("fine_tuned_teacher_mnli/model.safetensors")
+            
+        else:
+            print("Loading pretrained bert")
+            
+            #archive_file = hf_hub_download(pretrained_model_name_or_path, filename="pytorch_model.bin") 
+            #resolved_archive_file = cached_path(archive_file)
+            #weights = torch.load(resolved_archive_file, map_location="cpu")
+            model = BertModel.from_pretrained('bert-base-uncased')
+            weights = model.state_dict()
         
         # Convert old format to new format if needed from a PyTorch state_dict
         old_keys = []
@@ -78,6 +88,7 @@ class CoFiBertForSequenceClassification(BertForSequenceClassification):
                 new_keys.append(new_key)
         for old_key, new_key in zip(old_keys, new_keys):
             weights[new_key] = weights.pop(old_key)
+      
 
         if "config" not in kwargs:
             config = AutoConfig.from_pretrained(pretrained_model_name_or_path)
@@ -86,8 +97,7 @@ class CoFiBertForSequenceClassification(BertForSequenceClassification):
             config = kwargs["config"]
         
         model = cls(config)
-
-        load_pruned_model(model, weights)
+        load_pruned_model(model, weights, teacher)
         return model
 
     def forward(
@@ -129,6 +139,7 @@ class CoFiBertForSequenceClassification(BertForSequenceClassification):
         pooled_output = outputs[1]
 
         pooled_output = self.dropout(pooled_output)
+        
         logits = self.classifier(pooled_output) #! [32, 3]
 
         loss = None
@@ -199,6 +210,7 @@ class CoFiBertModel(BertModel):
         super().__init__(config)
         self.encoder = CoFiBertEncoder(config)
         self.embeddings = CoFiBertEmbeddings(config)
+        
 
     def forward(
         self,
@@ -391,13 +403,11 @@ class CoFiBertAttention(BertAttention):
 
     def prune_heads(self, heads):
         len_heads = len(heads)
-        if len_heads == 0:
+        if len_heads == 0: 
             return
-
         heads, index = find_pruneable_heads_and_indices(
             heads, self.self.num_attention_heads, self.self.attention_head_size, self.pruned_heads
         )
-        
         # Prune linear layers
         if len(index) == 0:
             self.self.query = None
@@ -590,10 +600,13 @@ class CoFiBertForQuestionAnswering(BertForQuestionAnswering):
     @classmethod
     def from_pretrained(cls, pretrained_model_name_or_path: Optional[Union[str, os.PathLike]], *model_args, **kwargs):
         if os.path.exists(pretrained_model_name_or_path):
-            weights = torch.load(os.path.join(pretrained_model_name_or_path, "pytorch_model.bin"), map_location=torch.device("cpu"))
+            print("loading finetuned bert")
+            weights = torch.load(os.path.join(pretrained_model_name_or_path, "pytorch_model.bin"), map_location=torch.device("cpu"))['state_dict']
+            
         else:
-            archive_file = hf_bucket_url(pretrained_model_name_or_path, "pytorch_model.bin") 
-            resolved_archive_file = cached_path(archive_file)
+            print(f"downloading bert from {pretrained_model_name_or_path}")
+            archive_file = get_file_from_repo(pretrained_model_name_or_path, "pytorch_model.bin") 
+            resolved_archive_file = cached_file(archive_file)
             weights = torch.load(resolved_archive_file, map_location="cpu")
         
         # Convert old format to new format if needed from a PyTorch state_dict
@@ -610,13 +623,13 @@ class CoFiBertForQuestionAnswering(BertForQuestionAnswering):
                 new_keys.append(new_key)
         for old_key, new_key in zip(old_keys, new_keys):
             weights[new_key] = weights.pop(old_key)
-        
+
         drop_weight_names = ["layer_transformation.weight", "layer_transformation.bias"]
         for name in drop_weight_names:
             if name in weights:
                 weights.pop(name)
 
-        config = AutoConfig.from_pretrained(pretrained_model_name_or_path)
+        config = AutoConfig.from_pretrained('bert-base-uncased')
         config.do_layer_distill = False
         model = cls(config)
 

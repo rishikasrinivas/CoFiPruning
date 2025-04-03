@@ -2,7 +2,7 @@ import torch
 import os
 from transformers.modeling_utils import prune_linear_layer
 from transformers import AutoConfig, BertForSequenceClassification
-from transformers.file_utils import hf_bucket_url, cached_path
+
 
 from utils.utils import calculate_parameters
 
@@ -108,6 +108,7 @@ def prune_model_with_z(zs, model):
 
     if "head_z" in zs:
         head_z = zs.get("head_z", None)
+        print(head_z)
         head_layer_z = zs.get("head_layer_z", None)
 
         prune_heads = {}
@@ -121,6 +122,7 @@ def prune_model_with_z(zs, model):
             print(f"Layer {layer}, heads {' '.join([str(i) for i in index])} pruned.")
         model.prune_heads(prune_heads)
 
+        
     kept_intermediate_dims = None
     if "intermediate_z" in zs:
         kept_intermediate_dims = {}
@@ -158,6 +160,7 @@ def prune_model_with_z(zs, model):
         bert.embeddings.token_type_embeddings.weight = torch.nn.parameter.Parameter(
             bert.embeddings.token_type_embeddings.weight.index_select(1, index).clone().detach())
         bert.embeddings.token_type_embeddings.embedding_dim = index.shape[0]
+    
         prune_layer_norm(bert.embeddings.LayerNorm, index)
 
         for layer in range(0, 12):
@@ -199,7 +202,7 @@ def prune_model_with_z(zs, model):
 
     if kept_intermediate_dims is not None:
         prune_intermediate_layers(model, kept_intermediate_dims)
-
+    
     for layer in range(0, 12):
         print("Layer:", layer)
         if bert.encoder.layer[layer].attention.self.query is not None:
@@ -250,22 +253,30 @@ def load_zs(model_path):
     else:
         return None
 
-def load_pruned_model(model, weights):
+def load_pruned_model(model, weights, teacher):
     config = model.config
     dim_per_head = config.hidden_size // config.num_attention_heads
     zs = {}
-
     architecture = config.architectures[0].lower()
-    bert_name = "roberta" if "roberta" in architecture else "bert"
+    bert_name = "roberta" if "roberta" in architecture else "encoder"
 
     hidden_z = torch.zeros(config.hidden_size)
-    hidden_z[:weights[f"{bert_name}.embeddings.word_embeddings.weight"].shape[1]] = 1
+    if teacher:
+        #hidden_z[:weights[f"{bert_name}.embeddings.word_embeddings.weight"].shape[1]] = 1
+        hidden_z[:weights[f"bert.embeddings.word_embeddings.weight"].shape[1]] = 1
+    else:
+        hidden_z[:weights[f"embeddings.word_embeddings.weight"].shape[1]] = 1
+        
     zs["hidden_z"] = hidden_z
 
     head_z = torch.zeros(config.num_hidden_layers, config.num_attention_heads)
     head_layer_z = torch.zeros(config.num_hidden_layers)
     for i in range(config.num_hidden_layers):
-        key = f"{bert_name}.encoder.layer.{i}.attention.output.dense.weight"
+        if teacher:
+            #key = f"{bert_name}.encoder.layer.{i}.attention.output.dense.weight"
+            key = f"bert.encoder.layer.{i}.attention.output.dense.weight"
+        else:
+            key = f"encoder.layer.{i}.attention.output.dense.weight"
         if key in weights:
             remaining_heads = weights[key].shape[-1] // dim_per_head
             head_z[i, :remaining_heads] = 1
@@ -276,16 +287,28 @@ def load_pruned_model(model, weights):
     int_z = torch.zeros(config.num_hidden_layers, config.intermediate_size)
     mlp_z = torch.zeros(config.num_hidden_layers)
     for i in range(config.num_hidden_layers):
-        key = f"bert.encoder.layer.{i}.output.dense.weight"
+        if teacher:
+            #key = f"{bert_name}.encoder.layer.{i}.output.dense.weight"
+            key = f"bert.encoder.layer.{i}.output.dense.weight"
+        else:
+            key = f"encoder.layer.{i}.output.dense.weight"
         if key in weights:
             remaining_int_dims = weights[key].shape[-1]
             int_z[i, :remaining_int_dims] = 1
             mlp_z[i] = 1
     zs["intermediate_z"] = int_z
     zs["mlp_z"] = mlp_z
-
+ 
     prune_model_with_z(zs, model)
-    model.load_state_dict(weights, strict=False)
+    #new_weights = {"bert." + k: v for k, v in weights.items()}
+    #print("KRYS ======= ", weights.keys())
+    
+    torch.save(weights, 'bert_pretrained_weights.pth')
+    torch.save(model.state_dict(), 'newly_instantated_cofi_weights.pth')
+    
+    missing, unexpected=model.load_state_dict(weights, strict=False)
+    #print("Missing ", missing, "\nUn ", unexpected)
+    torch.save(model.state_dict(), 'newly_instantated_cofi_updated_weights.pth')
     return model
 
 def get_full_model_size(model_class, model_name):
