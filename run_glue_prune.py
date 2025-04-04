@@ -54,7 +54,10 @@ def main():
         model_args, data_args, training_args, additional_args = parser.parse_args_into_dataclasses()
     #print("training args ", training_args)
     os.makedirs(training_args.output_dir, exist_ok=True)
-
+    print("Training Args: ", training_args)
+    print("Data Args: ", data_args)
+    print("Model Args: ", model_args)
+    print("Additional Args: ", additional_args)
      # Setup logging
     logging.basicConfig(
         format="%(asctime)s - %(levelname)s - %(name)s - %(message)s",
@@ -320,9 +323,9 @@ def main():
         eval_dataset = raw_datasets["validation_matched" if data_args.task_name == "mnli" else "validation"]
         if data_args.max_eval_samples is not None:
             eval_dataset = eval_dataset.select(range(data_args.max_eval_samples))
-        print("Loading sparse weights")
-        weights=load_file("out/MNLI/CoFi/MNLI_sparsity0.95/model.safetensors")
-        model.load_state_dict(weights)
+        #print("Loading sparse weights")
+        #weights=load_file("out/MNLI/CoFi/MNLI_sparsity0.95/model.safetensors")
+        #model.load_state_dict(weights)
         
 
     if training_args.do_predict or data_args.task_name is not None or data_args.test_file is not None:
@@ -380,7 +383,7 @@ def main():
     logger.info(
         f"************* {len(eval_dataset)} Evaluation Examples Loaded *************")
 
-
+    #model.load_state_dict(load_file("/workspace/CoFiPruning/out/MNLI/CoFi/MNLI_sparsity0.95/model.safetensors"))
     trainer = CoFiTrainer(
         model=model,
         args=training_args,

@@ -181,7 +181,7 @@ class CoFiTrainer(Trainer):
         num_update_steps_per_epoch = max(num_update_steps_per_epoch, 1) #! 12272
 
         if self.l0_module is not None:
-            lagrangian_warmup_steps = self.additional_args.lagrangian_warmup_epochs * num_update_steps_per_epoch #! 24544
+            lagrangian_warmup_steps = self.additional_args.lagrangian_warmup_epochs * num_update_steps_per_epoch #!24544 = 2*12272
             # self.prepruning_finetune_steps = self.additional_args.prepruning_finetune_epochs * num_update_steps_per_epoch
             self.l0_module.set_lagrangian_warmup_steps(lagrangian_warmup_steps)
             logger.info(f"Prepruning finetune steps: {self.prepruning_finetune_steps}")
@@ -249,7 +249,7 @@ class CoFiTrainer(Trainer):
         self.evaluate()
 
         # training
-        for epoch in range(1): #! 20 epoch
+        for epoch in range(5): #! 20 epoch
             print(f"Starting epoch {epoch}")
             epoch_start = time.time()
 
@@ -280,6 +280,7 @@ class CoFiTrainer(Trainer):
 
                 if self.start_prune:
                     zs = self.l0_module.forward(training=True) #! get the zs
+            
                     self.fill_inputs_with_zs(zs, inputs) #! use the zs
 
                 loss_terms = self.training_step(model, inputs)

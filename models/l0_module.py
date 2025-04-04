@@ -357,11 +357,13 @@ class L0Module(Module):
 
     def forward(self, training=True,):
         zs = {f"{type}_z": [] for type in self.types}
+   
 
         if training:
             for i, type in enumerate(self.types):
-                loga = self.z_logas[type]
-                z = self._sample_z(loga)
+                loga = self.z_logas[type] #randomly intialized to be x where ~sigmoid(x) = 1
+                z = self._sample_z(loga) #all 1's initially
+                
                 zs[f"{type}_z"] = z.reshape(self.shapes[type])
         else:
             for i, type in enumerate(self.types):
