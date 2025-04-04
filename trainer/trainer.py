@@ -201,7 +201,6 @@ class CoFiTrainer(Trainer):
         self.create_optimizer_and_scheduler(num_training_steps=self.t_total, build_l0_optimizer = self.start_prune)
 
         model = self.model
-        torch.save(model.state_dict(), "weights_as_soon_as_enter_trainer.pth")
         
                                 
         total_train_batch_size = 1
@@ -396,7 +395,6 @@ class CoFiTrainer(Trainer):
 
         # multi-gpu eval
         model = self.model
-        torch.save(model.state_dict(), "weights_as_soon_as_enter_eval.pth")
 
         batch_size = dataloader.batch_size
         logger.info("***** Running %s *****", description)
@@ -413,7 +411,6 @@ class CoFiTrainer(Trainer):
         all_preds = None
         all_labels = None
         model.eval()
-        torch.save(model.state_dict(), "weights_aftermodelevalsetting.pth")
 
         if self.args.past_index >= 0:
             self._past = None
@@ -709,6 +706,7 @@ class CoFiTrainer(Trainer):
         model.train()
         if self.l0_module is not None:
             self.l0_module.train()
+        #inputs; {labels: tensor, input_ids: tensor, token_type_ids: tensor, attention_mask: tensor}
         inputs = self._prepare_inputs(inputs)
         distill_loss = None
         distill_ce_loss = None

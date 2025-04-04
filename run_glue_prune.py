@@ -36,6 +36,7 @@ task_to_keys = {
     "sst2": ("sentence", None),
     "stsb": ("sentence1", "sentence2"),
     "wnli": ("sentence1", "sentence2"),
+    'snli': ("premise", "hypothesis"),  # added SNLI task
 }
 
 logger = logging.getLogger(__name__)
@@ -55,9 +56,9 @@ def main():
     #print("training args ", training_args)
     os.makedirs(training_args.output_dir, exist_ok=True)
     print("Training Args: ", training_args)
-    print("Data Args: ", data_args)
-    print("Model Args: ", model_args)
-    print("Additional Args: ", additional_args)
+    print("\nData Args: ", data_args)
+    print("\nModel Args: ", model_args)
+    print("\nAdditional Args: ", additional_args)
      # Setup logging
     logging.basicConfig(
         format="%(asctime)s - %(levelname)s - %(name)s - %(message)s",

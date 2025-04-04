@@ -22,11 +22,11 @@ class L0Module(Module):
                  lagrangian_warmup=0,
                  start_sparsity=0.0,
                  target_sparsity=0.0,
-                 pruning_type="structured_heads+structured_mlp+hidden+layer",
+                 pruning_type="structured_heads+structured_mlp+hidden+layer+final_mlp",
                  magical_number=0.8, # from Wang et al. 2020
                  ):
         super(L0Module, self).__init__()
-        self.all_types = ["hidden_z", "intermediate_z", "mlp_z", "head_layer_z", "head_z"]
+        self.all_types = ["hidden_z", "intermediate_z", "mlp_z", "head_layer_z", "head_z"] #add 'final_layer_mlp'
         self.pruning_type = pruning_type
 
         self.hidden_size = config.hidden_size
@@ -66,6 +66,8 @@ class L0Module(Module):
                 self.initialize_one_module(type)
         if "layer" in types:
             self.initialize_one_module("layer")
+        #elif 'finalmlp':
+        #     self.initialize_one_module("finalmlp")
 
         self.magical_number = magical_number
 
@@ -88,7 +90,7 @@ class L0Module(Module):
 
     def initialize_one_module(self, module_name):
         if module_name == "structured_mlp":
-            self.initialize_structured_mlp()
+            self.initialize_structured_mlp(module_name)
         elif module_name == "structured_heads":
             self.initialize_structured_head()
         elif module_name == "hidden":
@@ -96,6 +98,8 @@ class L0Module(Module):
         elif module_name == "layer":
             self.initialize_whole_mlp()
             self.initialized_layer_structured_heads()
+        elif module_name == "final_mlp":
+            self.initialize_structured_mlp(module_name)
             
     def add_one_module(self, z_loga, type, parameter_per_dim, size, shape): #! init the z_logas
         self.types.append(type)
@@ -136,13 +140,18 @@ class L0Module(Module):
                             parameter_per_dim=self.params_per_head * self.num_attention_heads, size=1,
                             shape=[n_layer])
         logger.info(f"Initialized layerwise structured heads! Prunable_model_size = {self.prunable_model_size}")
-
-    def initialize_structured_mlp(self):
+    
+    # ** Modified for BERT NLI **
+    def initialize_structured_mlp(self, layer): 
+        #distinguish between BERT MLP (intermediate + output dense) (shape 12,1,1,3072) and MLP after BERT (shape 1,1,1,1024)
+        
+        num_hidden_layers = 1 if layer == 'final_mlp' else self.num_hidden_layers
+        defined_type = 'mlp' if layer == 'final_mlp' else "intermediate"
+        
         self.int_loga = self.initialize_parameters(self.intermediate_size, self.num_hidden_layers)
-
-        self.add_one_module(self.int_loga, type="intermediate", 
+        self.add_one_module(self.int_loga, type=defined_type, 
                             parameter_per_dim=self.params_per_intermediate_dim, size=self.intermediate_size,
-                            shape=[self.num_hidden_layers, 1, 1, self.intermediate_size])
+                            shape=[num_hidden_layers, 1, 1, self.intermediate_size])
         self.prunable_model_size += self.params_per_mlp_layer * self.num_hidden_layers
         self.reset_loga(self.int_loga)
         logger.info(f"Initialized structured mlp! Prunable_model_size = {self.prunable_model_size}")
@@ -150,6 +159,7 @@ class L0Module(Module):
 
     def initialize_whole_mlp(self):
         n_layer = self.num_hidden_layers
+        
         self.intlayer_loga = self.initialize_parameters(n_layer)
         self.add_one_module(self.intlayer_loga, type="mlp", 
                             parameter_per_dim=self.params_per_mlp_layer, size=self.mlp_num_per_layer,
