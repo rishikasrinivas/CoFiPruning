@@ -23,8 +23,9 @@ from models.modeling_roberta import CoFiRobertaForSequenceClassification
 from trainer.trainer import CoFiTrainer 
 from utils.utils import *
 from models.model_args import ModelArguments
-
-import wandb
+from models import NLI_models
+import train_utils
+#import wandb
 
 task_to_keys = {
     "cola": ("sentence", None),
@@ -96,124 +97,52 @@ def main():
                        training_args, additional_args)
 
     
-    t_name = None 
-    if data_args.task_name is not None:
-        # Downloading and loading a dataset from the hub.
-        raw_datasets = load_dataset(
-            "./glue.py", data_args.task_name.replace("-", ""), cache_dir=model_args.cache_dir)
-        t_name = data_args.task_name
-    elif data_args.dataset_name is not None:
-        # Downloading and loading a dataset from the hub.
-        raw_datasets = load_dataset(
-            data_args.dataset_name, data_args.dataset_config_name, cache_dir=model_args.cache_dir
-        )
-        t_name = data_args.dataset_name
-    else:
-        # Loading a dataset from your local files.
-        # CSV/JSON training and evaluation files are needed.
-        t_name = data_args.t_name
-        data_files = {"train": data_args.train_file,
-                      "validation": data_args.validation_file}
-
-        # Get the test dataset: you can provide your own CSV/JSON test file (see below)
-        # when you use `do_predict` without specifying a GLUE benchmark task.
-        if training_args.do_predict:
-            if data_args.test_file is not None:
-                train_extension = data_args.train_file.split(".")[-1]
-                test_extension = data_args.test_file.split(".")[-1]
-                assert (
-                    test_extension == train_extension
-                ), "`test_file` should have the same extension (csv or json) as `train_file`."
-                data_files["test"] = data_args.test_file
-            else:
-                raise ValueError(
-                    "Need either a GLUE task or a test file for `do_predict`.")
-
-        for key in data_files.keys():
-            logger.info(f"load a local file for {key}: {data_files[key]}")
-
-        if data_args.train_file.endswith(".csv"):
-            # Loading a dataset from local csv files
-            raw_datasets = load_dataset(
-                "csv", data_files=data_files, cache_dir=model_args.cache_dir)
-        elif data_args.train_file.endswith(".tsv"):
-            dataset_dict = {}
-            for key in data_files:
-                dataset_dict[key] = load_from_tsv(data_files[key])
-            raw_datasets = DatasetDict(dataset_dict)
-        else:
-            # Loading a dataset from local json files
-            raw_datasets = load_dataset(
-                "json", data_files=data_files, cache_dir=model_args.cache_dir)
-    # See more about loading any type of standard or custom dataset at
-    # https://huggingface.co/docs/datasets/loading_datasets.html.
-
-    # Labels
-    if data_args.task_name is not None:
-        is_regression = data_args.task_name == "stsb"
-        if not is_regression:
-            label_list = raw_datasets["train"].features["label"].names
-            num_labels = len(label_list)
-        else:
-            num_labels = 1
-    else:
-        # Trying to have good defaults here, don't hesitate to tweak to your needs.
-        is_regression = raw_datasets["train"].features["label"].dtype in [
-            "float32", "float64"]
-        if is_regression:
-            num_labels = 1
-        else:
-            # A useful fast method:
-            # https://huggingface.co/docs/datasets/package_reference/main_classes.html#datasets.Dataset.unique
-            label_list = raw_datasets["train"].unique("label")
-            label_list.sort()  # Let's sort it for determinism
-            num_labels = len(label_list)
-
-    config = AutoConfig.from_pretrained(
-        model_args.config_name if model_args.config_name else model_args.model_name_or_path,
-        num_labels=num_labels,
-        finetuning_task=t_name,
-        cache_dir=model_args.cache_dir,
-        revision=model_args.model_revision,
-        use_auth_token=True if model_args.use_auth_token else None,
-    )
-    tokenizer = AutoTokenizer.from_pretrained(
-        model_args.tokenizer_name if model_args.tokenizer_name else model_args.model_name_or_path,
-        cache_dir=model_args.cache_dir,
-        use_fast=model_args.use_fast_tokenizer,
-        revision=model_args.model_revision,
-        use_auth_token=True if model_args.use_auth_token else None,
-    )
+    t_name = 'snli' 
+    
+    max_data = 1000 if data_args.data_debug > 0 else None
+    train,val,test, _ = train_utils.create_dataloaders(max_data)
+    print(val.labels)
+    teacher_model,_ = train_utils.load_model(max_data, 'bert', train, ckpt=additional_args.distillation_path, device='cpu')
+    config = deepcopy(teacher_model.encoder.config)
+    tokenizer = teacher_model.tokenizer
 
     # set up configuration for distillation
     if additional_args.do_distill:
         config.output_attentions = True
         config.output_hidden_states = True
-    from safetensors.torch import load_file
+        
+ 
     Model = CoFiBertForSequenceClassification if model_args.model_name_or_path.startswith(
         "bert") else CoFiRobertaForSequenceClassification
     print("loading teacher")
     teacher_model = None
     if additional_args.do_distill:
+        
         teacher_model = Model.from_pretrained(
-            additional_args.distillation_path,
-            config=deepcopy(config),
-            teacher=True
+            pretrained_model_name_or_path=additional_args.distillation_path, #BERT/model_best.pth
+            train_data=train,
+            teacher=True,
+            config=config,
+            max_data = max_data
         )
         teacher_model.eval() #! inside has a cofibertmodel #! CofiBertForSequenceClassification
 
     config.do_layer_distill = additional_args.do_layer_distill #! True
-    print("loading student ",model_args.model_name_or_path )
+    
     model = Model.from_pretrained(
-        model_args.model_name_or_path,
+        pretrained_model_name_or_path=None, #Pretrained model
         from_tf=bool(".ckpt" in model_args.model_name_or_path),
-        config=config,
         teacher=False,
+        config=config,
+        max_data=max_data,
+        train_data= train,
+        output_dir = training_args.output_dir,
         cache_dir=model_args.cache_dir,
         revision=model_args.model_revision,
         use_auth_token=True if model_args.use_auth_token else None,
     ) #! inside the function, we get the original struct  #! CofiBertForSequenceClassification
-    torch.save(model.state_dict(), "first_loaded_student.pth")
+    
+   
     # initialize the layer transformation matrix to be an identity matrix
     if additional_args.do_layer_distill:
         initialize_layer_transformation(model)
@@ -223,7 +152,7 @@ def main():
 
     zs = None
     
-    if additional_args.pretrained_pruned_model is not None:
+    if additional_args.pretrained_pruned_model is not None: #should be None in this case
         zs = load_zs(additional_args.pretrained_pruned_model)
         model = load_model(additional_args.pretrained_pruned_model, Model, zs)
         print(
@@ -238,7 +167,7 @@ def main():
                              pruning_type=additional_args.pruning_type)
 
     if data_args.task_name is not None:
-        sentence1_key, sentence2_key = task_to_keys[data_args.task_name]
+        sentence1_key, sentence2_key = task_to_keys[data_args.task_name] #(sentence1_key, sentence2_key) = (premise, hypothesis)
     else:
         # Again, we try to have some nice defaults but don't hesitate to tweak to your use case.
         non_label_column_names = [name for name in raw_datasets["train"].column_names if name != "label"]
@@ -256,34 +185,38 @@ def main():
     else:
         # We will pad later, dynamically at batch creation, to the max sequence length in each batch
         padding = False
+        
+   
 
     # Some models have set the order of the labels to use, so let's make sure we do use it.
-    label_to_id = None
+    print( model.config)
+    num_labels=3
+    is_regression = False
+    label_to_id = train.label_stoi
+    label_list = list(label_to_id.keys())
     if (
         model.config.label2id != PretrainedConfig(num_labels=num_labels).label2id
         and data_args.task_name is not None
         and not is_regression
     ):
         # Some have all caps in their config, some don't.
-        label_name_to_id = {k.lower(): v for k, v in model.config.label2id.items()}
-        if list(sorted(label_name_to_id.keys())) == list(sorted(label_list)):
-            label_to_id = {i: int(label_name_to_id[label_list[i]]) for i in range(num_labels)}
-        else:
-            logger.warning(
-                "Your model seems to have been trained with labels, but they don't match the dataset: ",
-                f"model labels: {list(sorted(label_name_to_id.keys()))}, dataset labels: {list(sorted(label_list))}."
-                "\nIgnoring the model labels as a result.",
-            )
+        
+        label_to_id = {i: sorted(label_list)[i] for i in range(len(list(sorted(label_list))))}
+         
     elif data_args.task_name is None and not is_regression:
         label_to_id = {v: i for i, v in enumerate(label_list)}
+    else:
+        raise Error("error line 182 run_glue_prune.py")
+    print(label_to_id)
 
     if label_to_id is not None:
         model.config.label2id = label_to_id
-        model.config.id2label = {id: label for label, id in config.label2id.items()}
+        model.config.id2label = {id: label for label, id in model.config.label2id.items()}
     elif data_args.task_name is not None and not is_regression:
         model.config.label2id = {l: i for i, l in enumerate(label_list)}
         model.config.id2label = {id: label for label, id in config.label2id.items()}
-
+    print("run_glue_prune.py line 210: model.config.label2id = ", model.config.label2id)
+    
     if data_args.max_seq_length > tokenizer.model_max_length:
         logger.warning(
             f"The max_seq_length passed ({data_args.max_seq_length}) is larger than the maximum length for the"
@@ -303,49 +236,16 @@ def main():
             result["label"] = [(label_to_id[l] if l != -1 else -1) for l in examples["label"]]
         return result
 
-    with training_args.main_process_first(desc="dataset map pre-processing"):
-        raw_datasets = raw_datasets.map(
-            preprocess_function,
-            batched=True,
-            load_from_cache_file=not data_args.overwrite_cache,
-            desc="Running tokenizer on dataset",
-        ) #! get dataset
     
-    if training_args.do_train:
-        if "train" not in raw_datasets:
-            raise ValueError("--do_train requires a train dataset")
-        train_dataset = raw_datasets["train"]
-        if data_args.max_train_samples is not None:
-            train_dataset = train_dataset.select(range(data_args.max_train_samples))
-    from torch.utils.data import DataLoader
-    if training_args.do_eval:
-        if "validation" not in raw_datasets and "validation_matched" not in raw_datasets:
-            raise ValueError("--do_eval requires a validation dataset")
-        eval_dataset = raw_datasets["validation_matched" if data_args.task_name == "mnli" else "validation"]
-        if data_args.max_eval_samples is not None:
-            eval_dataset = eval_dataset.select(range(data_args.max_eval_samples))
-        #print("Loading sparse weights")
-        #weights=load_file("out/MNLI/CoFi/MNLI_sparsity0.95/model.safetensors")
-        #model.load_state_dict(weights)
-        
-
-    if training_args.do_predict or data_args.task_name is not None or data_args.test_file is not None:
-        if "test" not in raw_datasets and "test_matched" not in raw_datasets:
-            raise ValueError("--do_predict requires a test dataset")
-        predict_dataset = raw_datasets["test_matched" if data_args.task_name == "mnli" else "test"]
-        if data_args.max_predict_samples is not None:
-            predict_dataset = predict_dataset.select(range(data_args.max_predict_samples))
-
-    # Log a few random samples from the training set:
-    if training_args.do_train:
-        for index in random.sample(range(len(train_dataset)), 3):
-            logger.info(f"Sample {index} of the training set: {train_dataset[index]}.")
-
+    
     # Get the metric function
-    if data_args.task_name is not None:
+    if data_args.task_name == 'snli':
+        metric = evaluate.load("accuracy")
+    elif  data_args.task_name is not None:
         metric = evaluate.load("glue", data_args.task_name)
     else:
         metric = evaluate.load("accuracy")
+        
     import gc
     # You can define your custom compute_metrics function. It takes an `EvalPrediction` object (a namedtuple with a
     # predictions and label_ids field) and has to return a dictionary string to float.
@@ -380,17 +280,17 @@ def main():
         data_collator = None
 
     logger.info(
-        f"************* {len(train_dataset)} Training Examples Loaded *************")
+        f"************* {len(train)} Training Examples Loaded *************")
     logger.info(
-        f"************* {len(eval_dataset)} Evaluation Examples Loaded *************")
+        f"************* {len(val)} Evaluation Examples Loaded *************")
 
     #model.load_state_dict(load_file("/workspace/CoFiPruning/out/MNLI/CoFi/MNLI_sparsity0.95/model.safetensors"))
     trainer = CoFiTrainer(
         model=model,
         args=training_args,
         additional_args=additional_args,
-        train_dataset=train_dataset if training_args.do_train else None,
-        eval_dataset=eval_dataset if training_args.do_eval else None,
+        train_dataset=train if training_args.do_train else None,
+        eval_dataset=val if training_args.do_eval else None,
         compute_metrics=compute_metrics,
         tokenizer=tokenizer,
         data_collator=data_collator,

@@ -261,22 +261,14 @@ def load_pruned_model(model, weights, teacher):
     bert_name = "roberta" if "roberta" in architecture else "encoder"
 
     hidden_z = torch.zeros(config.hidden_size)
-    if teacher:
-        #hidden_z[:weights[f"{bert_name}.embeddings.word_embeddings.weight"].shape[1]] = 1
-        hidden_z[:weights[f"bert.embeddings.word_embeddings.weight"].shape[1]] = 1
-    else:
-        hidden_z[:weights[f"embeddings.word_embeddings.weight"].shape[1]] = 1
+    hidden_z[:weights[f"encoder.embeddings.word_embeddings.weight"].shape[1]] = 1
         
     zs["hidden_z"] = hidden_z
 
     head_z = torch.zeros(config.num_hidden_layers, config.num_attention_heads)
     head_layer_z = torch.zeros(config.num_hidden_layers)
     for i in range(config.num_hidden_layers):
-        if teacher:
-            #key = f"{bert_name}.encoder.layer.{i}.attention.output.dense.weight"
-            key = f"bert.encoder.layer.{i}.attention.output.dense.weight"
-        else:
-            key = f"encoder.layer.{i}.attention.output.dense.weight"
+        key = f"encoder.encoder.layer.{i}.attention.output.dense.weight"
         if key in weights:
             remaining_heads = weights[key].shape[-1] // dim_per_head
             head_z[i, :remaining_heads] = 1
@@ -287,11 +279,7 @@ def load_pruned_model(model, weights, teacher):
     int_z = torch.zeros(config.num_hidden_layers, config.intermediate_size)
     mlp_z = torch.zeros(config.num_hidden_layers)
     for i in range(config.num_hidden_layers):
-        if teacher:
-            #key = f"{bert_name}.encoder.layer.{i}.output.dense.weight"
-            key = f"bert.encoder.layer.{i}.output.dense.weight"
-        else:
-            key = f"encoder.layer.{i}.output.dense.weight"
+        key = f"encoder.encoder.layer.{i}.output.dense.weight"
         if key in weights:
             remaining_int_dims = weights[key].shape[-1]
             int_z[i, :remaining_int_dims] = 1
@@ -303,8 +291,8 @@ def load_pruned_model(model, weights, teacher):
     #new_weights = {"bert." + k: v for k, v in weights.items()}
     #print("KRYS ======= ", weights.keys())
     
-    torch.save(weights, 'bert_pretrained_weights.pth')
-    torch.save(model.state_dict(), 'newly_instantated_cofi_weights.pth')
+   # torch.save(weights, 'bert_pretrained_weights.pth')
+    #torch.save(model.state_dict(), 'newly_instantated_cofi_weights.pth')
     
     missing, unexpected=model.load_state_dict(weights, strict=False)
     #print("Missing ", missing, "\nUn ", unexpected)

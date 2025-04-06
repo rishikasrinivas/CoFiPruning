@@ -8,7 +8,7 @@
 
 
 glue_low=(MRPC RTE STSB CoLA)
-glue_high=(MNLI QQP QNLI SST2)
+glue_high=(MNLI QQP QNLI SST2 SNLI)
 
 proj_dir=.
 
@@ -35,6 +35,9 @@ epochs=20
 
 # seed
 seed=57
+
+#debug
+debug=100
 
 # output dir
 ex_name_suffix=$2
@@ -84,6 +87,7 @@ fi
 mkdir -p $output_dir
 
 python3 $code_dir/run_glue_prune.py \
+       --data_debug ${debug}\
 	   --output_dir ${output_dir} \
 	   --logging_steps ${logging_steps} \
 	   --task_name ${task_name} \

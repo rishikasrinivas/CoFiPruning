@@ -3,7 +3,7 @@ import os
 import sys
 import time
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
-
+import data.snli as snli
 import numpy as np
 import torch
 import torch.nn.functional as F
@@ -30,7 +30,7 @@ from args import AdditionalArguments
 from utils.cofi_utils import *
 from utils.utils import *
 
-import wandb
+#import wandb
 
 logger = logging.get_logger(__name__)
 
@@ -92,7 +92,7 @@ class CoFiTrainer(Trainer):
 
         Trainer.__init__(self, model, args, data_collator, train_dataset,
                          eval_dataset, tokenizer, model_init, compute_metrics=compute_metrics, **kwargs)
-
+       
         self.additional_args = additional_args
         self.finetuned_teacher = False
         self.l0_module = l0_module
@@ -174,7 +174,6 @@ class CoFiTrainer(Trainer):
                 self.lr_scheduler = None
     
     def train(self):
-        
         train_dataloader = self.get_train_dataloader()
         num_update_steps_per_epoch = len(
             train_dataloader) // self.args.gradient_accumulation_steps
@@ -244,6 +243,7 @@ class CoFiTrainer(Trainer):
         disable_tqdm = self.args.disable_tqdm or not self.is_local_process_zero()
         train_pbar = trange(epochs_trained, int(
             np.ceil(num_train_epochs)), desc="Epoch", disable=disable_tqdm)
+
 
         self.evaluate()
 
@@ -379,14 +379,15 @@ class CoFiTrainer(Trainer):
 
         # wandb.log({'global_step':self.global_step,'training_loss':tr_loss.item() / self.global_step})
         return TrainOutput(self.global_step, tr_loss.item() / self.global_step, None)
-
+    from accelerate.utils import tqdm 
     def prediction_loop(self, dataloader: DataLoader, description: str, prediction_loss_only: Optional[bool] = None) -> PredictionOutput:
         prediction_loss_only = (
             prediction_loss_only if prediction_loss_only is not None else self.args.prediction_loss_only
         )
         
         
-
+        print("Dataloader type:", dataloader.dataset)
+        print("Is iterable:", hasattr(dataloader, '__iter__'))
         # disable output hidden states and attention during evaluation
         self.model.config.output_hidden_states = False
         self.model.config.output_attentions = False
@@ -397,10 +398,7 @@ class CoFiTrainer(Trainer):
         model = self.model
 
         batch_size = dataloader.batch_size
-        logger.info("***** Running %s *****", description)
-        logger.info("  Num examples = %d", self.num_examples(dataloader))
-        logger.info("  Batch size = %d", batch_size)
-
+        
         # Initialize containers
         # losses/preds/labels on GPU/TPU (accumulated for eval_accumulation_steps)
         losses_host = None
@@ -425,7 +423,10 @@ class CoFiTrainer(Trainer):
         if zs is not None:
             pruned_model_size_info = self.l0_module.calculate_model_size(zs)
 
-        for ii, inputs in enumerate(tqdm(dataloader, desc=description, disable=disable_tqdm)):
+        
+        for (s1, s1len, s2, s2len, targets) in tqdm(dataloader, desc=description, disable=disable_tqdm):
+            self.tokenizer()
+            
             if zs is not None:
                 if ii == 0:
                     logger.info(f"Putting zs {zs.keys()} into inputs:")
@@ -503,7 +504,16 @@ class CoFiTrainer(Trainer):
         return PredictionOutput(predictions=all_preds, label_ids=all_labels, metrics=metrics)
 
     def evaluate(self, eval_dataset: Optional[Dataset] = None) -> Tuple[Dict[str, float], List]:
-        eval_dataloader = self.get_eval_dataloader(eval_dataset)
+        print("eval_dataset: ", self.val_data, flush=True)
+        eval_dataloader  = torch.utils.data.DataLoader(
+            self.eval_dataset, 
+            batch_size=100, 
+            shuffle=False, 
+            pin_memory=True, 
+            num_workers=0, 
+            collate_fn=snli.pad_collate
+        )
+        print("eval_dataloader: ", eval_dataloader.dataset)
         output = self.prediction_loop(
             eval_dataloader, description="Evaluation")
 

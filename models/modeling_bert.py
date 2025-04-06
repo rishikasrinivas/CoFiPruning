@@ -20,7 +20,7 @@ from transformers.trainer import Trainer
 from transformers.training_args import TrainingArguments
 from safetensors.torch import load_file
 from huggingface_hub import hf_hub_download
-
+import train_utils
 from utils.cofi_utils import *
 logger = logging.getLogger(__name__)
 
@@ -59,20 +59,21 @@ class CoFiBertForSequenceClassification(BertForSequenceClassification):
             self.layer_transformation = None
 
     @classmethod
-    def from_pretrained(cls, pretrained_model_name_or_path: Optional[Union[str, os.PathLike]], teacher, *model_args, **kwargs):
-
+    def from_pretrained(cls, pretrained_model_name_or_path: Optional[Union[str, os.PathLike]], teacher,train_data,max_data, *model_args, **kwargs):
+        config=None
         if teacher:
             print("Loading weights from fine_tuned_teacher_mnli/model.safetensors")
-            weights = load_file("fine_tuned_teacher_mnli/model.safetensors")
+            teacher_model,_ = train_utils.load_model(max_data, 'bert', train_data, ckpt=pretrained_model_name_or_path, device='cuda')
+            weights = teacher_model.state_dict()
             
         else:
-            print("Loading pretrained bert")
-            
+            print("Loading pretrained bert entailment")
             #archive_file = hf_hub_download(pretrained_model_name_or_path, filename="pytorch_model.bin") 
             #resolved_archive_file = cached_path(archive_file)
             #weights = torch.load(resolved_archive_file, map_location="cpu")
-            model = BertModel.from_pretrained('bert-base-uncased')
-            weights = model.state_dict()
+            student_model,_ = train_utils.load_model(max_data, 'bert', train_data, store_dir=kwargs['output_dir'], ckpt=pretrained_model_name_or_path, device='cuda')
+            weights = student_model.state_dict()
+            config = student_model.encoder.config
         
         # Convert old format to new format if needed from a PyTorch state_dict
         old_keys = []
@@ -91,9 +92,10 @@ class CoFiBertForSequenceClassification(BertForSequenceClassification):
       
 
         if "config" not in kwargs:
-            config = AutoConfig.from_pretrained(pretrained_model_name_or_path)
-            config.do_layer_distill = False
+            print("Using the loaded config")
+            config = config
         else:
+            print("Using the parameter config")
             config = kwargs["config"]
         
         model = cls(config)

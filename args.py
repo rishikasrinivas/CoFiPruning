@@ -5,6 +5,7 @@ from typing import Optional
 task_to_keys = {
     "cola": ("sentence", None),
     "mnli": ("premise", "hypothesis"),
+    "snli": ("premise", "hypothesis"),
     "mrpc": ("sentence1", "sentence2"),
     "qnli": ("question", "sentence"),
     "qqp": ("question1", "question2"),
@@ -68,12 +69,17 @@ class DataTrainingArguments:
         default=None,
         metadata={"help": "The name of the task to train on: " + ", ".join(task_to_keys.keys())},
     )
+        
     dataset_name: Optional[str] = field(
         default=None, metadata={"help": "The name of the dataset to use (via the datasets library)."}
     )
     
     t_name: Optional[str] = field(
         default=None, metadata={"help": "The name of the training and validation files."}
+    )
+        
+    data_debug: int = field(
+        default=0, metadata={"help": "None for not in debug mode, else a number to indicate how many training samples to load"}
     )
 
     dataset_config_name: Optional[str] = field(
