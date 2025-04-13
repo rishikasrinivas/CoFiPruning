@@ -25,17 +25,19 @@ from transformers.trainer_utils import (PREFIX_CHECKPOINT_DIR, EvalPrediction,
                                         TrainOutput)
 from transformers.utils import logging
 from transformers.training_args import TrainingArguments
-
+import data.snli as snli 
 from args import AdditionalArguments
 from utils.cofi_utils import *
 from utils.utils import *
-
+import torch.nn as nn
+import train_utils
 #import wandb
 
 logger = logging.get_logger(__name__)
 
 glue_tasks = {"cola": "matthews_correlation",
               "mnli": "mnli/acc",
+              "snli": "accuracy",
               "mrpc": "accuracy",
               "sst2": "accuracy",
               "stsb": "corr",
@@ -92,7 +94,7 @@ class CoFiTrainer(Trainer):
 
         Trainer.__init__(self, model, args, data_collator, train_dataset,
                          eval_dataset, tokenizer, model_init, compute_metrics=compute_metrics, **kwargs)
-       
+        self.num_workers = 4
         self.additional_args = additional_args
         self.finetuned_teacher = False
         self.l0_module = l0_module
@@ -174,7 +176,7 @@ class CoFiTrainer(Trainer):
                 self.lr_scheduler = None
     
     def train(self):
-        train_dataloader = self.get_train_dataloader()
+        train_dataloader  = self.get_train_dataloader()
         num_update_steps_per_epoch = len(
             train_dataloader) // self.args.gradient_accumulation_steps
         num_update_steps_per_epoch = max(num_update_steps_per_epoch, 1) #! 12272
@@ -244,9 +246,13 @@ class CoFiTrainer(Trainer):
         train_pbar = trange(epochs_trained, int(
             np.ceil(num_train_epochs)), desc="Epoch", disable=disable_tqdm)
 
-
+        
+        #if not self.finetuned_teacher:
+            #self.teacher_model = self.finetune_teacher(self.teacher_model)
+            #self.finetuned_teacher = True
+        print("Evaling")
         self.evaluate()
-
+        print("================ret from eval")
         # training
         for epoch in range(5): #! 20 epoch
             print(f"Starting epoch {epoch}")
@@ -268,7 +274,7 @@ class CoFiTrainer(Trainer):
             for step, inputs in enumerate(epoch_iterator):
                 if self.prepruning_finetune_steps > 0 and self.global_step == self.prepruning_finetune_steps: #! before pruning, run 12272 steps
                     self.start_prune = True
-
+                    print("STARTING PRUNING 277 trainerpy")
                     self.optimizer = None
                     self.lr_scheduler = None
                     lr_steps = self.t_total - self.global_step
@@ -276,7 +282,8 @@ class CoFiTrainer(Trainer):
                     # reset the optimizer
                     self.create_optimizer_and_scheduler(lr_steps, self.start_prune)
                     logger.info("Starting l0 regularization!")
-
+            
+                
                 if self.start_prune:
                     zs = self.l0_module.forward(training=True) #! get the zs
             
@@ -417,20 +424,21 @@ class CoFiTrainer(Trainer):
 
         zs = None
         if self.start_prune:
+            print("Starting prune!")
             self.l0_module.eval()
             zs = self.l0_module.forward(training=False)
-
+        
         if zs is not None:
             pruned_model_size_info = self.l0_module.calculate_model_size(zs)
 
         
-        for (s1, s1len, s2, s2len, targets) in tqdm(dataloader, desc=description, disable=disable_tqdm):
-            self.tokenizer()
-            
+        for ii, inputs in enumerate(tqdm(dataloader, desc=description, disable=disable_tqdm)):
+            print("436 trainer. inputs: ", inputs)
             if zs is not None:
                 if ii == 0:
                     logger.info(f"Putting zs {zs.keys()} into inputs:")
                 self.fill_inputs_with_zs(zs, inputs) #! use the zs
+                print("438 trainer, usedzs")
             loss, logits, labels = self.prediction_step(
                 model, inputs, prediction_loss_only)
 
@@ -504,23 +512,58 @@ class CoFiTrainer(Trainer):
         return PredictionOutput(predictions=all_preds, label_ids=all_labels, metrics=metrics)
 
     def evaluate(self, eval_dataset: Optional[Dataset] = None) -> Tuple[Dict[str, float], List]:
-        print("eval_dataset: ", self.val_data, flush=True)
-        eval_dataloader  = torch.utils.data.DataLoader(
-            self.eval_dataset, 
-            batch_size=100, 
-            shuffle=False, 
-            pin_memory=True, 
-            num_workers=0, 
-            collate_fn=snli.pad_collate
+        from torch.nn.utils.rnn import pad_sequence
+        import torch
+
+        def custom_padding_collator(features):
+            # Initialize batch dict
+            batch = {
+                "pre_input_ids": [],
+                "pre_attention_mask": [],
+                "hyp_input_ids": [],
+                "hyp_attention_mask": [],
+                "labels": []
+            }
+
+            # Separate and pad each feature
+            for feature in features:
+                for key in batch.keys():
+                    if key != "labels":
+                        batch[key].append(torch.tensor(feature[key]))
+                    else:
+                        batch[key].append(feature["label"])
+
+            # Pad sequences
+            padded_batch = {}
+            for key in batch:
+                if key != "labels":
+                    padded_batch[key] = pad_sequence(
+                        batch[key],
+                        batch_first=True,
+                        padding_value=1  # Use your SNLI's padding index
+                    )
+                else:
+                    padded_batch[key] = torch.tensor(batch[key])
+
+            return padded_batch
+        eval_dataloader = DataLoader(
+            self.val_data,
+            batch_size=100,
+            shuffle=True,
+            pin_memory=False,
+            num_workers=0,
+            collate_fn=custom_padding_collator,
         )
-        print("eval_dataloader: ", eval_dataloader.dataset)
+   
+        print("517 val set dataloader: ", eval_dataloader.dataset)
+        
         output = self.prediction_loop(
             eval_dataloader, description="Evaluation")
 
         self.log(output.metrics)
         # wandb.log(output.metrics)
         output.metrics["step"] = self.global_step
-
+        print("LINE 515 ", output.metrics)
         logger.info(f"Evaluating: {output.metrics}")
 
         eval_score = 0
@@ -539,7 +582,7 @@ class CoFiTrainer(Trainer):
 
         # logger.info(f"starting saving best: {self.global_step} {self.start_saving_best}")
     
-        if True:#self.start_saving_best:
+        if self.start_saving_best:
             
             best_so_far = self.eval_counter.update(
                 self.epoch, self.global_step, eval_score)
@@ -688,24 +731,20 @@ class CoFiTrainer(Trainer):
         #weights = torch.load("model_best.pth", map_location=torch.device("cpu"))['state_dict']
         print(f"Finetuning MNLI teacher model ")
         
-        training_args = TrainingArguments(
-            output_dir="mnli_teacher",
-            per_device_train_batch_size=16,
-            num_train_epochs=3,
-            evaluation_strategy="steps",
+        train_dataloader  = self.get_train_dataloader()
+        eval_dataloader  = self.get_eval_dataloader(self.val_data)
+        
+        
+        dataloaders = {
+            'train': train_dataloader,
+            'val':eval_dataloader,
+        }
+        
+        optimizer = AdamW(teacher.parameters(), lr=2e-5, eps=1e-8)  # AdamW optimizer is recommended for BERT
+        criterion = nn.CrossEntropyLoss()
+        teacher = train_utils.finetune_pruned_model(model=teacher,model_type='bert', optimizer=self.optimizer,criterion=criterion, train=self.train_data, val=self.val_data, dataloaders = dataloaders, finetune_epochs=5, prune_metrics_dir=".",device = 'cuda')
             
-            save_strategy="steps",
-            save_steps=500,
-            learning_rate=2e-5,
-        )
-
-        trainer = Trainer(
-            model=teacher,
-            args=training_args,
-            train_dataset=self.train_data,
-            eval_dataset=self.val_data
-        )
-        trainer.train()
+        #trainer.train()
         weights = teacher.state_dict()
         teacher.save_pretrained("fine_tuned_teacher_mnli")
         return teacher
@@ -722,9 +761,6 @@ class CoFiTrainer(Trainer):
         distill_ce_loss = None
         
         if self.teacher_model is not None:
-            #if not self.finetuned_teacher:
-                #self.teacher_model = self.finetune_teacher(self.teacher_model)
-                #self.finetuned_teacher = True
             with torch.no_grad():
                 # only retain inputs of certain keys
                 teacher_inputs_keys = ["input_ids", "attention_mask", "token_type_ids", "position_ids", "labels",

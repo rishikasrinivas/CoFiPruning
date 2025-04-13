@@ -261,6 +261,7 @@ def load_pruned_model(model, weights, teacher):
     bert_name = "roberta" if "roberta" in architecture else "encoder"
 
     hidden_z = torch.zeros(config.hidden_size)
+    print(list(weights.keys())[:10])
     hidden_z[:weights[f"encoder.embeddings.word_embeddings.weight"].shape[1]] = 1
         
     zs["hidden_z"] = hidden_z

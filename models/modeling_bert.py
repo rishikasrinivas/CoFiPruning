@@ -59,11 +59,11 @@ class CoFiBertForSequenceClassification(BertForSequenceClassification):
             self.layer_transformation = None
 
     @classmethod
-    def from_pretrained(cls, pretrained_model_name_or_path: Optional[Union[str, os.PathLike]], teacher,train_data,max_data, *model_args, **kwargs):
-        config=None
+    def from_pretrained(cls, pretrained_model_name_or_path: Optional[Union[str, os.PathLike]], teacher, *model_args, **kwargs):
+
         if teacher:
             print("Loading weights from fine_tuned_teacher_mnli/model.safetensors")
-            teacher_model,_ = train_utils.load_model(max_data, 'bert', train_data, ckpt=pretrained_model_name_or_path, device='cuda')
+            teacher_model,_ = train_utils.load_model(kwargs['max_data'], 'bert', kwargs['train_data'], ckpt=pretrained_model_name_or_path, device='cuda')
             weights = teacher_model.state_dict()
             
         else:
@@ -71,10 +71,8 @@ class CoFiBertForSequenceClassification(BertForSequenceClassification):
             #archive_file = hf_hub_download(pretrained_model_name_or_path, filename="pytorch_model.bin") 
             #resolved_archive_file = cached_path(archive_file)
             #weights = torch.load(resolved_archive_file, map_location="cpu")
-            student_model,_ = train_utils.load_model(max_data, 'bert', train_data, store_dir=kwargs['output_dir'], ckpt=pretrained_model_name_or_path, device='cuda')
+            student_model,_ = train_utils.load_model(kwargs['max_data'], 'bert', kwargs['train_data'], store_dir=kwargs['output_dir'], ckpt=pretrained_model_name_or_path, device='cuda')
             weights = student_model.state_dict()
-            config = student_model.encoder.config
-        
         # Convert old format to new format if needed from a PyTorch state_dict
         old_keys = []
         new_keys = []
@@ -92,17 +90,16 @@ class CoFiBertForSequenceClassification(BertForSequenceClassification):
       
 
         if "config" not in kwargs:
-            print("Using the loaded config")
-            config = config
+            config = AutoConfig.from_pretrained(pretrained_model_name_or_path)
+            config.do_layer_distill = False
         else:
-            print("Using the parameter config")
             config = kwargs["config"]
         
         model = cls(config)
         load_pruned_model(model, weights, teacher)
         return model
 
-    def forward(
+    '''def forward(
             self,
             input_ids=None,
             attention_mask=None,
@@ -118,10 +115,30 @@ class CoFiBertForSequenceClassification(BertForSequenceClassification):
             intermediate_z=None,
             mlp_z=None,
             hidden_z=None,
+    ):'''
+    def forward(
+            self,
+            pre_input_ids=None,
+            pre_attention_mask=None,
+            hyp_input_ids=None,
+            hyp_attention_mask=None,
+            token_type_ids=None,
+            position_ids=None,
+            inputs_embeds=None,
+            labels=None,
+            output_attentions=None,
+            output_hidden_states=None,
+            return_dict=None,
+            head_z=None,
+            head_layer_z=None,
+            intermediate_z=None,
+            mlp_z=None,
+            hidden_z=None,
     ):
+    
 
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
-
+        print("121 head_z", head_z is not None)
         outputs = self.bert(
             input_ids,
             attention_mask=attention_mask,
@@ -232,7 +249,7 @@ class CoFiBertModel(BertModel):
         mlp_z=None,
         hidden_z=None
     ):
-
+       
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
         output_hidden_states = (
             output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states

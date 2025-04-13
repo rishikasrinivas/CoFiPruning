@@ -86,7 +86,7 @@ fi
 
 mkdir -p $output_dir
 
-python3 $code_dir/run_glue_prune.py \
+python3 $code_dir/run_glue_tokenizer_in_preprocess.py \
        --data_debug ${debug}\
 	   --output_dir ${output_dir} \
 	   --logging_steps ${logging_steps} \
