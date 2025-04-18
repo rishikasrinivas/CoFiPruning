@@ -63,17 +63,15 @@ def create_dataloaders(max_data):
             collate_fn=pad_collate
         )
         
-        val = SNLI("data/snli_1.0","dev",max_data=10000,vocab=(train_loader.dataset.stoi, train_loader.dataset.itos),unknowns=False)
-        val_loader = DataLoader(
-            val, 
+        val_dataset = torch.load(f'{root_dir}/val_dataset.pth')
+        val_loader = torch.utils.data.DataLoader(
+            val_dataset, 
             batch_size=100, 
             shuffle=False,
-            pin_memory=True, 
-            num_workers=0, 
+            pin_memory=True,
+            num_workers=0,
             collate_fn=pad_collate
-        
         )
-        torch.save(val_loader.dataset, f'{root_dir}/val_dataset.pth')
         
         
         test_dataset = torch.load(f'{root_dir}/test_dataset.pth')

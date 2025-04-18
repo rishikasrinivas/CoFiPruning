@@ -6,6 +6,7 @@ import random
 from copy import deepcopy
 import collections
 import datasets
+from datasets import load_from_disk
 import numpy as np
 import torch
 import transformers
@@ -242,6 +243,7 @@ def main():
                 words.append(sentence)
 
             return tokenizer(words, is_split_into_words=True, return_tensors="pt", padding=True, truncation=True)
+        
         s1_pad, s1len, s2_pad, s2len, labels = snli.pad_collate([
             (torch.tensor(p), plen, torch.tensor(h), hlen, l)
             for p, plen, h, hlen, l in zip(
@@ -273,7 +275,7 @@ def main():
         return result
 
     with training_args.main_process_first(desc="dataset map pre-processing"):
-        '''hf_train = Dataset.from_dict({
+        hf_train = Dataset.from_dict({
             "premise": train.s1s,  # Replace with your actual attributes
             "premise_len": train.s1lens,  # Replace with your actual attributes
             "hypothesis": train.s2s,
@@ -284,14 +286,18 @@ def main():
             preprocess_function,
             batched=True,
             load_from_cache_file=not data_args.overwrite_cache,
+            remove_columns=["premise", "premise_len", "hypothesis", "hypothesis_len"],
             desc="Running tokenizer on dataset",
         ) #! get dataset
         train = train.filter(
             lambda example: example["label"] != -1,
             desc="Filtering out samples with label -1"
-        )'''
+        )
         
-        print(len(val.s1s), len(val.s1lens), len(val.s2s), len(val.s2lens), len(val.labels))
+        train.save_to_disk("proceesed_train")
+        reloaded_train = load_from_disk("proceesed_train")
+        assert train.features == reloaded_train.features
+        
         hf_val = Dataset.from_dict({
             "premise": val.s1s,  # Replace with your actual attributes
             "premise_len": val.s1lens,  # Replace with your actual attributes
@@ -310,40 +316,9 @@ def main():
             lambda example: example["label"] != -1,
             desc="Filtering out samples with label -1"
         )
-        print(val)
-    
-    
-    '''if training_args.do_train:
-        if "train" not in raw_datasets:
-            raise ValueError("--do_train requires a train dataset")
-        train_dataset = raw_datasets["train"]
-        print("Labels ", set(train_dataset['label']))
-        if data_args.max_train_samples is not None:
-            train_dataset = train_dataset.select(range(data_args.max_train_samples))
-    from torch.utils.data import DataLoader
-    if training_args.do_eval:
-        if "validation" not in raw_datasets and "validation_matched" not in raw_datasets:
-            raise ValueError("--do_eval requires a validation dataset")
-        eval_dataset = raw_datasets["validation"]
-        print("EVAL Labels ", set(eval_dataset['label']))
-        if data_args.max_eval_samples is not None:
-            eval_dataset = eval_dataset.select(range(data_args.max_eval_samples))
-        #print("Loading sparse weights")
-        #weights=load_file("out/MNLI/CoFi/MNLI_sparsity0.95/model.safetensors")
-        #model.load_state_dict(weights)
-        
-
-    if training_args.do_predict or data_args.task_name is not None or data_args.test_file is not None:
-        if "test" not in raw_datasets and "test_matched" not in raw_datasets:
-            raise ValueError("--do_predict requires a test dataset")
-        predict_dataset = raw_datasets["test"]
-        if data_args.max_predict_samples is not None:
-            predict_dataset = predict_dataset.select(range(data_args.max_predict_samples))
-
-    # Log a few random samples from the training set:
-    if training_args.do_train:
-        for index in random.sample(range(len(train_dataset)), 3):
-            logger.info(f"Sample {index} of the training set: {train_dataset[index]}.")'''
+        val.save_to_disk("proceesed_val")
+        reloaded_val = load_from_disk("proceesed_val")
+        assert val.features == reloaded_val.features
 
     # Get the metric function
     metric = evaluate.load("accuracy")

@@ -49,7 +49,41 @@ glue_tasks = {"cola": "matthews_correlation",
               "mrpc_aug": "accuracy",
               "qnli_aug": "accuracy",
               "stsb_aug": "corr",}
+from torch.nn.utils.rnn import pad_sequence
+import torch
 
+def custom_padding_collator(features):
+    # Initialize batch dict
+    batch = {
+        "pre_input_ids": [],
+        "pre_attention_mask": [],
+        "hyp_input_ids": [],
+        "hyp_attention_mask": [],
+        "labels": []
+    }
+
+    # Separate and pad each feature
+    for feature in features:
+        for key in batch.keys():
+            if key != "labels":
+                batch[key].append(torch.tensor(feature[key]))
+            else:
+                batch[key].append(feature["label"])
+
+    # Pad sequences
+    padded_batch = {}
+    for key in batch:
+        if key != "labels":
+            padded_batch[key] = pad_sequence(
+                batch[key],
+                batch_first=True,
+                padding_value=1  # Use your SNLI's padding index
+            )
+        else:
+            padded_batch[key] = torch.tensor(batch[key])
+
+    return padded_batch
+        
 class Eval_Counter():
     def __init__(self):
         self.epoch = 0
@@ -176,7 +210,15 @@ class CoFiTrainer(Trainer):
                 self.lr_scheduler = None
     
     def train(self):
-        train_dataloader  = self.get_train_dataloader()
+        train_dataloader = DataLoader (
+            self.train_data,
+            batch_size=50,
+            shuffle=True,
+            pin_memory=False,
+            num_workers=0,
+            collate_fn=custom_padding_collator,
+        )
+   
         num_update_steps_per_epoch = len(
             train_dataloader) // self.args.gradient_accumulation_steps
         num_update_steps_per_epoch = max(num_update_steps_per_epoch, 1) #! 12272
@@ -433,12 +475,10 @@ class CoFiTrainer(Trainer):
 
         
         for ii, inputs in enumerate(tqdm(dataloader, desc=description, disable=disable_tqdm)):
-            print("436 trainer. inputs: ", inputs)
             if zs is not None:
                 if ii == 0:
                     logger.info(f"Putting zs {zs.keys()} into inputs:")
-                self.fill_inputs_with_zs(zs, inputs) #! use the zs
-                print("438 trainer, usedzs")
+                self.fill_inputs_with_zs(zs, inputs) #! use the zd
             loss, logits, labels = self.prediction_step(
                 model, inputs, prediction_loss_only)
 
@@ -512,41 +552,9 @@ class CoFiTrainer(Trainer):
         return PredictionOutput(predictions=all_preds, label_ids=all_labels, metrics=metrics)
 
     def evaluate(self, eval_dataset: Optional[Dataset] = None) -> Tuple[Dict[str, float], List]:
-        from torch.nn.utils.rnn import pad_sequence
-        import torch
-
-        def custom_padding_collator(features):
-            # Initialize batch dict
-            batch = {
-                "pre_input_ids": [],
-                "pre_attention_mask": [],
-                "hyp_input_ids": [],
-                "hyp_attention_mask": [],
-                "labels": []
-            }
-
-            # Separate and pad each feature
-            for feature in features:
-                for key in batch.keys():
-                    if key != "labels":
-                        batch[key].append(torch.tensor(feature[key]))
-                    else:
-                        batch[key].append(feature["label"])
-
-            # Pad sequences
-            padded_batch = {}
-            for key in batch:
-                if key != "labels":
-                    padded_batch[key] = pad_sequence(
-                        batch[key],
-                        batch_first=True,
-                        padding_value=1  # Use your SNLI's padding index
-                    )
-                else:
-                    padded_batch[key] = torch.tensor(batch[key])
-
-            return padded_batch
-        eval_dataloader = DataLoader(
+        
+        
+        eval_dataloader = DataLoader (
             self.val_data,
             batch_size=100,
             shuffle=True,
@@ -555,8 +563,6 @@ class CoFiTrainer(Trainer):
             collate_fn=custom_padding_collator,
         )
    
-        print("517 val set dataloader: ", eval_dataloader.dataset)
-        
         output = self.prediction_loop(
             eval_dataloader, description="Evaluation")
 
@@ -622,10 +628,15 @@ class CoFiTrainer(Trainer):
             if "head_layer_z" in zs:
                 head_layer_z = zs["head_layer_z"].detach().cpu()
 
-            teacher_layer_output = teacher_outputs[2][1:] #! hidden states, with a length of 12. Every has a shape of [32, 65, 768]
+            teacher_layer_output = teacher_outputs[2][1:] #! hidden states, with a length of 12. Every has a shape of [32, 65, 768] for pre and hyp
+            #tlop, tloh =  teacher_outputs[2][1:]?
+            print("after getting all hidden states shape line 633 trainer: ", teacher_layer_output.shape)
             student_layer_output = student_outputs[2][1:] 
 
             # distilliting existing layers
+            
+            #orig: a single pre + hyp concatentation passed into bert and each layers hidden state given
+            #ours: 2 inputs so outputs are hidden state pre hidden state hyp so for each layer msle lossfor pres and hyps
             if self.additional_args.layer_distill_version == 2:
                 for layer_num, (t_layer_o, s_layer_o) in enumerate(zip(teacher_layer_output, student_layer_output)):
                     s_layer_o = self.model.layer_transformation(s_layer_o)
@@ -650,17 +661,25 @@ class CoFiTrainer(Trainer):
                 else:
                     specified_teacher_layers = [2, 5, 8, 11]
                 # logger.info(f"sampled teacher layers: {specified_teacher_layers}")
+                
                 transformed_s_layer_o = [self.model.layer_transformation(
-                    s_layer_o) for s_layer_o in student_layer_output]
+                    s_layer_o) for s_layer_o in student_layer_output] #studnetlayer output would be  premise_output concatenated with hyp outputs so [[pre outs],[hyp outs]]
+                                                                                        #better to itnerpotlate for p_out1, hyp_out1
+                                                                                                                    #p_out2, hyp_out2
+                        #rn its [layer1 out, layer2 out, etc]
+                        #change to [(layer1 pre, layer1 hyp), (layer2 pre, layer2 hyp), etc...]
+                
                 specified_teacher_layer_reps = [
                     teacher_layer_output[i] for i in specified_teacher_layers] #! teacher: 4x[32,113,768]
+                        #rn its [layer1 out, layer2 out, etc]
+                        #change to [(layer1 pre, layer1 hyp), (layer2 pre, layer2 hyp), etc...]
 
                 device = transformed_s_layer_o[0].device
                 for t_layer_o in specified_teacher_layer_reps:
                     for i, s_layer_o in enumerate(transformed_s_layer_o): #! student: 12x[32,113,768]
-                        l.append(mse_loss(t_layer_o, s_layer_o))
+                        l.append(mse_loss(t_layer_o, s_layer_o)) #mse(t_layer_pre, s_layer_pre), mse(t_layer_hyp, s_layer_hyp) #cant u add them since its just yhe loss
                 layerwiseloss = torch.stack(l).reshape(
-                    len(specified_teacher_layer_reps), len(student_layer_output)) #! [4,12]
+                    len(specified_teacher_layer_reps), len(student_layer_output)) #! [4,12] cannot do w list of tuples
 
                 existing_layers = None
                 if head_layer_z is not None:
@@ -721,9 +740,14 @@ class CoFiTrainer(Trainer):
         return distill_loss, ce_distill_loss, loss
 
     def shortens_inputs(self, inputs):
-        max_length = inputs["attention_mask"].sum(-1).max().item()
-        inputs["input_ids"] = inputs["input_ids"][:, :max_length]
-        inputs["attention_mask"] = inputs["attention_mask"][:, :max_length]
+        print("730, the inputs to shortens which will be passed into the model is ", inputs.keys())
+        max_length = inputs["pre_attention_mask"].sum(-1).max().item()
+        inputs["pre_input_ids"] = inputs["pre_input_ids"][:, :max_length]
+        inputs["pre_attention_mask"] = inputs["pre_attention_mask"][:, :max_length]
+        
+        max_length = inputs["hyp_attention_mask"].sum(-1).max().item()
+        inputs["hyp_input_ids"] = inputs["hyp_input_ids"][:, :max_length]
+        inputs["hyp_attention_mask"] = inputs["hyp_attention_mask"][:, :max_length]
         if "token_type_ids" in inputs:
             inputs["token_type_ids"] = inputs["token_type_ids"][:, :max_length]
             
@@ -755,15 +779,15 @@ class CoFiTrainer(Trainer):
         model.train()
         if self.l0_module is not None:
             self.l0_module.train()
-        #inputs; {labels: tensor, input_ids: tensor, token_type_ids: tensor, attention_mask: tensor}
+        #inputs; {labels: tensor, input_ids: tensor, token_type_ids: tensor, attention_mask: tensor
         inputs = self._prepare_inputs(inputs)
         distill_loss = None
         distill_ce_loss = None
-        
+       
         if self.teacher_model is not None:
             with torch.no_grad():
                 # only retain inputs of certain keys
-                teacher_inputs_keys = ["input_ids", "attention_mask", "token_type_ids", "position_ids", "labels",
+                teacher_inputs_keys = ["hyp_input_ids", "hyp_attention_mask", "pre_input_ids", "pre_attention_mask", "token_type_ids", "position_ids", "labels",
                                        "output_attentions", "output_hidden_states", "return_dict"]
                 teacher_inputs = {key: inputs[key]
                                   for key in teacher_inputs_keys if key in inputs}
@@ -773,6 +797,7 @@ class CoFiTrainer(Trainer):
             self.shortens_inputs(inputs)
             
             student_outputs = model(**inputs) #! get the two outputs
+            print(student_outputs)
 
             zs = {key: inputs[key] for key in inputs if "_z" in key} #! extract the zs
             distill_loss, distill_ce_loss, loss = self.calculate_distillation_loss(

@@ -49,7 +49,19 @@ class CoFiBertForSequenceClassification(BertForSequenceClassification):
     def __init__(self, config):
         super().__init__(config)
         self.bert = CoFiBertModel(config)
-
+        
+        self.encoder_dim = config.hidden_size
+        self.mlp_input_dim = self.encoder_dim * 4
+        
+        self.dropout = nn.Dropout(0.1)
+        self.bn = nn.BatchNorm1d(self.mlp_input_dim)
+        self.mlp = nn.Sequential(
+            nn.Linear(self.mlp_input_dim, 1024),
+            nn.ReLU(),
+            nn.Dropout(0.1),
+            nn.Linear(1024, 3),
+        )
+        
         self.do_layer_distill = getattr(config, "do_layer_distill", False)
 
         if self.do_layer_distill:
@@ -139,9 +151,9 @@ class CoFiBertForSequenceClassification(BertForSequenceClassification):
 
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
         print("121 head_z", head_z is not None)
-        outputs = self.bert(
-            input_ids,
-            attention_mask=attention_mask,
+        outputs_pre = self.bert(
+            pre_input_ids,
+            attention_mask=pre_attention_mask,
             token_type_ids=token_type_ids,
             position_ids=position_ids,
             inputs_embeds=inputs_embeds,
@@ -154,12 +166,33 @@ class CoFiBertForSequenceClassification(BertForSequenceClassification):
             mlp_z=mlp_z,
             hidden_z=hidden_z
         ) #! [32, 68, 768]
-
-        pooled_output = outputs[1]
-
-        pooled_output = self.dropout(pooled_output)
         
-        logits = self.classifier(pooled_output) #! [32, 3]
+        outputs_hyp = self.bert(
+            hyp_input_ids,
+            attention_mask=hyp_attention_mask,
+            token_type_ids=token_type_ids,
+            position_ids=position_ids,
+            inputs_embeds=inputs_embeds,
+            output_attentions=output_attentions,
+            output_hidden_states=output_hidden_states,
+            return_dict=return_dict,
+            head_z=head_z,
+            head_layer_z=head_layer_z,
+            intermediate_z=intermediate_z,
+            mlp_z=mlp_z,
+            hidden_z=hidden_z
+        )
+        hyp_out = outputs_hyp.last_hidden_state[:,0,:]
+        pre_out = outputs_pre.last_hidden_state[:,0,:]
+        diffs = pre_out - hyp_out
+        prods = pre_out * hyp_out
+        
+        mlp_input = torch.cat([pre_out, hyp_out,diffs,prods],dim=1)
+        
+        
+        mlp_input = self.bn(mlp_input)
+        mlp_input = self.dropout(mlp_input)
+        logits = self.mlp(mlp_input)
 
         loss = None
         if labels is not None:
@@ -173,14 +206,18 @@ class CoFiBertForSequenceClassification(BertForSequenceClassification):
                     logits.view(-1, self.num_labels), labels.view(-1))
 
         if not return_dict:
-            output = (logits,) + outputs[2:]
+            combined_hidden_states = (pre_outputs.hidden_states, hyp_outputs.hidden_states)
+            combined_attentions = (pre_outputs.attentions, hyp_outputs.attentions)
+            output = (logits,) +  (combined_hidden_states, combined_attentions)
+           # output = (logits,) + outputs[2:]
+            print("Returning no dict: ", ((loss,) + output) if loss is not None else output)
             return ((loss,) + output) if loss is not None else output
-
+        print("Returning Seq Classif obj")
         return SequenceClassifierOutput(
             loss=loss,
             logits=logits,
-            hidden_states=outputs.hidden_states,
-            attentions=outputs.attentions,
+            hidden_states=(outputs_pre.hidden_states, outputs_hyp.hidden_states),
+            attentions=(outputs_pre.attentions, outputs_hyp.attentions)
         )
 
 
@@ -254,6 +291,8 @@ class CoFiBertModel(BertModel):
         output_hidden_states = (
             output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
         )
+        assert output_attentions is not None, "output attention is none"
+        assert output_hidden_states is not None, "output_hidden_states is none"
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
         if input_ids is not None and inputs_embeds is not None:
@@ -287,8 +326,8 @@ class CoFiBertModel(BertModel):
             embedding_output,
             attention_mask=extended_attention_mask,
             encoder_hidden_states=encoder_hidden_states,
-            output_attentions=output_attentions,
-            output_hidden_states=output_hidden_states,
+            output_attentions=True,
+            output_hidden_states=True,
             return_dict=return_dict,
             intermediate_z=intermediate_z,
             head_z=head_z,
@@ -296,6 +335,7 @@ class CoFiBertModel(BertModel):
             head_layer_z=head_layer_z,
             hidden_z=hidden_z
         )
+        
 
         sequence_output = encoder_outputs[0]
         pooled_output = self.pooler(sequence_output)

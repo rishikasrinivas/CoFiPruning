@@ -84,8 +84,7 @@ if [[ $pruning_type == None ]]; then
   batch_size=64
 fi
 
-mkdir -p $output_dir
-
+mkdir -p "$output_dir"
 python3 $code_dir/run_glue_tokenizer_in_preprocess.py \
        --data_debug ${debug}\
 	   --output_dir ${output_dir} \
@@ -120,3 +119,4 @@ python3 $code_dir/run_glue_tokenizer_in_preprocess.py \
      --layer_distill_version $layer_distill_version \
      --prepruning_finetune_epochs $prepruning_finetune_epochs \
      --lagrangian_warmup_epochs $lagrangian_warmup_epochs 2>&1 | tee ${output_dir}/log.txt
+nsys stats --report gputrace "$LOG.qdrep"

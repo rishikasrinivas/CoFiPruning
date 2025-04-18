@@ -1,4 +1,4 @@
-transformers==4.17.0.dev
+transformers
 scipy==1.7.3
 datasets==1.14.0
 scikit-learn==1.0.2
